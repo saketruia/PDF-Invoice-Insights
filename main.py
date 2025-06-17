@@ -11,6 +11,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
+import zipfile
+import io
 
 # ------------------------------------------------------------------------------
 # 1. Loading API key from .env
@@ -20,7 +22,14 @@ genai.configure(api_key=API_KEY)
 
 def extract_field(pdf_file):
     """Save PDF temporarily and send it to Gemini to extract pincode, delivery/shipment charges, and main date in pure JSON format."""
-    prompt = """Analyze this PDF and extract pincode, delivery/shipment charges, and a main date (such as delivery, billing, or invoice date) in pure JSON format with keys pincode, delivery_charge, main_date. If not present, put "NA".
+    prompt = """Analyze this PDF and extract pincode, delivery/shipment charges (including GST/tax), and a main date (such as delivery, billing, or invoice date) in pure JSON format with keys pincode, delivery_charge, main_date. 
+
+    For delivery_charge:
+    - If there's a total delivery amount (including GST/tax), use that total amount
+    - If only base delivery charge is available without tax, use that amount
+    - Look for terms like: delivery charge, shipping charge, freight charge, courier charge, GST, tax, CGST, SGST, IGST
+    - Calculate total = base delivery charge + any applicable taxes/GST
+    - If not present, put "NA"
 
     Format the main date in DD-MM-YYYY format.
 
@@ -50,16 +59,97 @@ def extract_field(pdf_file):
     
     return {"pincode": "NA", "delivery_charge": "NA", "main_date": "NA"}
 
-def append_to_file(filename, new_df):
-    """Append new data to an existing CSV or create it if it doesn't exist."""
-    if os.path.exists(filename):
-        existing_df = pd.read_excel(filename)
-        df = pd.concat([existing_df, new_df], ignore_index=True)
-    else:
-        df = new_df
+def extract_pdfs_from_zip(zip_file):
+    """Extract all PDF files from a ZIP file and return them as a list of file-like objects."""
+    pdf_files = []
     
-    df.to_excel(filename, index=False)
-    return df
+    try:
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            for file_info in zip_ref.infolist():
+                if file_info.filename.lower().endswith('.pdf') and not file_info.is_dir():
+                    # Extract the PDF file content
+                    pdf_content = zip_ref.read(file_info.filename)
+                    
+                    # Create a file-like object
+                    pdf_file_obj = io.BytesIO(pdf_content)
+                    pdf_file_obj.name = file_info.filename
+                    
+                    pdf_files.append(pdf_file_obj)
+        
+        return pdf_files
+    
+    except Exception as e:
+        st.error(f"Error extracting ZIP file: {e}")
+        return []
+
+def process_uploaded_files(uploaded_files):
+    """Process uploaded files (PDFs and ZIP files containing PDFs)."""
+    all_pdf_files = []
+    
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name.lower().endswith('.pdf'):
+            # Direct PDF file
+            all_pdf_files.append(uploaded_file)
+        elif uploaded_file.name.lower().endswith('.zip'):
+            # ZIP file containing PDFs
+            st.info(f"📦 Extracting PDFs from {uploaded_file.name}...")
+            pdf_files_from_zip = extract_pdfs_from_zip(uploaded_file)
+            if pdf_files_from_zip:
+                all_pdf_files.extend(pdf_files_from_zip)
+                st.success(f"✅ Extracted {len(pdf_files_from_zip)} PDF files from {uploaded_file.name}")
+            else:
+                st.warning(f"⚠️ No PDF files found in {uploaded_file.name}")
+        else:
+            st.warning(f"⚠️ Unsupported file type: {uploaded_file.name}")
+    
+    return all_pdf_files
+
+def append_to_file(filename, new_df):
+    """Append new data to an existing Excel file or create it if it doesn't exist."""
+    max_attempts = 5
+    
+    for attempt in range(max_attempts):
+        try:
+            if os.path.exists(filename):
+                existing_df = pd.read_excel(filename)
+                df = pd.concat([existing_df, new_df], ignore_index=True)
+            else:
+                df = new_df
+            
+            # Try to save the file
+            df.to_excel(filename, index=False)
+            return df
+            
+        except PermissionError:
+            if attempt < max_attempts - 1:
+                st.warning(f"⚠️ Cannot access '{filename}'. Please close the file if it's open in Excel or another program. Retrying in 3 seconds... (Attempt {attempt + 1}/{max_attempts})")
+                time.sleep(3)
+            else:
+                # Final attempt - try with a different filename
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_filename = f"extracted_data_backup_{timestamp}.xlsx"
+                st.error(f"❌ Could not save to '{filename}'. Saving as '{backup_filename}' instead.")
+                
+                try:
+                    if os.path.exists(filename):
+                        existing_df = pd.read_excel(filename)
+                        df = pd.concat([existing_df, new_df], ignore_index=True)
+                    else:
+                        df = new_df
+                    
+                    df.to_excel(backup_filename, index=False)
+                    st.success(f"✅ Data saved successfully as '{backup_filename}'")
+                    return df
+                    
+                except Exception as e:
+                    st.error(f"❌ Failed to save file: {str(e)}")
+                    return new_df
+                    
+        except Exception as e:
+            st.error(f"❌ Unexpected error while saving file: {str(e)}")
+            return new_df
+    
+    return new_df
 
 def extract_numeric_value(delivery_charge):
     """Extract numeric value from delivery charge string."""
@@ -76,10 +166,17 @@ def extract_numeric_value(delivery_charge):
     return 0
 
 def load_existing_data(filename):
-    """Load existing data from Excel file."""
-    if os.path.exists(filename):
-        return pd.read_excel(filename)
-    else:
+    """Load existing data from Excel file with error handling."""
+    try:
+        if os.path.exists(filename):
+            return pd.read_excel(filename)
+        else:
+            return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+    except PermissionError:
+        st.error(f"❌ Cannot read '{filename}'. Please close the file if it's open in Excel.")
+        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+    except Exception as e:
+        st.error(f"❌ Error reading file: {str(e)}")
         return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
 
 def create_dashboard(df):
@@ -327,47 +424,74 @@ st.title("📊 Invoice Information Extractor & Dashboard")
 tab1, tab2 = st.tabs(["📤 Upload & Extract", "📊 Dashboard"])
 
 with tab1:
-    st.write("**Upload PDF files to extract pincode, delivery/shipment charges, and main date.**")
-    uploaded_files = st.file_uploader("Choose PDF files", accept_multiple_files=True, type=['pdf'])
+    st.write("**Upload PDF files or ZIP files containing PDFs to extract pincode, delivery/shipment charges (including GST/tax), and main date.**")
+    uploaded_files = st.file_uploader("Choose PDF or ZIP files", accept_multiple_files=True, type=['pdf', 'zip'])
 
     if uploaded_files:
-        data = []
-
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        for i, uploaded_file in enumerate(uploaded_files):
-            status_text.text(f"Processing {uploaded_file.name} ({i+1}/{len(uploaded_files)})")
-            fields = extract_field(uploaded_file)
-
-            pincode = fields.get("pincode", "NA")
-            delivery_charge = fields.get("delivery_charge", "NA")
-            main_date = fields.get("main_date", "NA")
-
-            data.append([uploaded_file.name, delivery_charge, main_date, pincode])
+        # Process all uploaded files (PDFs and ZIPs)
+        all_pdf_files = process_uploaded_files(uploaded_files)
+        
+        if not all_pdf_files:
+            st.error("❌ No PDF files found to process!")
+        else:
+            st.info(f"📋 Total PDF files to process: {len(all_pdf_files)}")
             
-            progress_bar.progress((i + 1) / len(uploaded_files))
+            data = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-        status_text.text("Processing complete!")
-        
-        df = pd.DataFrame(data, columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+            for i, pdf_file in enumerate(all_pdf_files):
+                file_name = getattr(pdf_file, 'name', f'file_{i+1}.pdf')
+                status_text.text(f"Processing {file_name} ({i+1}/{len(all_pdf_files)})")
+                
+                # Reset file pointer for processing
+                if hasattr(pdf_file, 'seek'):
+                    pdf_file.seek(0)
+                
+                fields = extract_field(pdf_file)
 
-        st.success("✅ Data extracted successfully!")
-        st.write("**Extracted Data:**")
-        st.dataframe(df, use_container_width=True)
+                pincode = fields.get("pincode", "NA")
+                delivery_charge = fields.get("delivery_charge", "NA")
+                main_date = fields.get("main_date", "NA")
 
-        output_file = "extracted_data.xlsx"
-        final_df = append_to_file(output_file, df)
+                data.append([file_name, delivery_charge, main_date, pincode])
+                
+                progress_bar.progress((i + 1) / len(all_pdf_files))
 
-        with open(output_file, "rb") as f:
-            st.download_button(
-                label="📥 Download as Excel",
-                data=f,
-                file_name=output_file,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        
-        st.info("💡 Data has been added to the existing Excel file. Check the Dashboard tab to see updated analytics!")
+            status_text.text("Processing complete!")
+            
+            df = pd.DataFrame(data, columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+
+            st.success("✅ Data extracted successfully!")
+            st.write("**Extracted Data:**")
+            st.dataframe(df, use_container_width=True)
+
+            output_file = "extracted_data.xlsx"
+            final_df = append_to_file(output_file, df)
+
+            # Check which file was actually created/updated
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"extracted_data_backup_{timestamp}.xlsx"
+            
+            download_filename = output_file if os.path.exists(output_file) else backup_filename
+            
+            if os.path.exists(download_filename):
+                with open(download_filename, "rb") as f:
+                    st.download_button(
+                        label="📥 Download as Excel",
+                        data=f,
+                        file_name=download_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            
+            st.info("💡 Data has been added to the Excel file. Check the Dashboard tab to see updated analytics!")
+            
+            # Show file status
+            if os.path.exists(output_file):
+                st.success(f"✅ Data successfully saved to: {output_file}")
+            elif os.path.exists(backup_filename):
+                st.warning(f"⚠️ Original file was locked, data saved to: {backup_filename}")
+                st.info("💡 To merge with your main file, close Excel and run the upload again.")
 
 with tab2:
     # Load existing data for dashboard

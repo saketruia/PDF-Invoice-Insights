@@ -21,19 +21,42 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=API_KEY)
 
 def extract_field(pdf_file):
-    """Save PDF temporarily and send it to Gemini to extract pincode, delivery/shipment charges, and main date in pure JSON format."""
-    prompt = """Analyze this PDF and extract pincode, delivery/shipment charges (including GST/tax), and a main date (such as delivery, billing, or invoice date) in pure JSON format with keys pincode, delivery_charge, main_date. 
+    """Save PDF temporarily and send it to Gemini to extract sender pincode, receiver pincode, delivery/shipment charges, and main date in pure JSON format."""
+    prompt = """Analyze this PDF and extract sender pincode, receiver pincode, delivery/shipment charges, and a main date in pure JSON format with keys sender_pincode, receiver_pincode, delivery_charge, main_date.
 
-    For delivery_charge:
-    - If there's a total delivery amount (including GST/tax), use that total amount
+    IMPORTANT INSTRUCTIONS:
+    
+    1. PORTER INVOICE DETECTION:
+    - If you see "PORTER" written in the top left corner of the document, this is a Porter invoice
+    - For Porter invoices:
+      * Use "Total Amount" or "Grand Total" as the delivery_charge (NOT delivery/shipping charges)
+      * Look for pickup and drop locations (usually in bottom right section)
+      * Extract pincodes from pickup location as sender_pincode and drop location as receiver_pincode
+      * If pickup/drop locations or their pincodes are not found, put "NA"
+    
+    2. REGULAR INVOICES (Non-Porter):
+    - Look for sender and receiver addresses throughout the document
+    - Common terms: "Bill To", "Ship To", "From", "To", "Sender", "Recipient", "Billing Address", "Shipping Address"
+    - Extract pincodes from sender address as sender_pincode and receiver address as receiver_pincode
+    - For delivery_charge: Look for delivery/shipping charges including GST/tax (same as before)
+    
+    3. DELIVERY CHARGE CALCULATION:
+    - For Porter: Use Total Amount/Grand Total
+    - For Regular: If there's a total delivery amount (including GST/tax), use that total amount
     - If only base delivery charge is available without tax, use that amount
     - Look for terms like: delivery charge, shipping charge, freight charge, courier charge, GST, tax, CGST, SGST, IGST
     - Calculate total = base delivery charge + any applicable taxes/GST
     - If not present, put "NA"
 
-    Format the main date in DD-MM-YYYY format.
+    4. DATE FORMAT:
+    - Format the main date in DD-MM-YYYY format
+    - Look for delivery date, billing date, or invoice date
 
-    Provide ONLY the raw JSON and nothing else."""    
+    5. PINCODES:
+    - Extract 6-digit pincodes from addresses
+    - If sender or receiver pincode not found, put "NA" for that field
+
+    Provide ONLY the raw JSON and nothing else with keys: sender_pincode, receiver_pincode, delivery_charge, main_date"""    
     
     model = genai.GenerativeModel('gemini-1.5-flash')  # Free and faster
     
@@ -57,7 +80,7 @@ def extract_field(pdf_file):
             st.error(f"Error retrieving from Gemini (attempt {attempt + 1}): {e}")
             time.sleep(30)  # Wait and retry
     
-    return {"pincode": "NA", "delivery_charge": "NA", "main_date": "NA"}
+    return {"sender_pincode": "NA", "receiver_pincode": "NA", "delivery_charge": "NA", "main_date": "NA"}
 
 def extract_pdfs_from_zip(zip_file):
     """Extract all PDF files from a ZIP file and return them as a list of file-like objects."""
@@ -127,7 +150,7 @@ def append_to_file(filename, new_df):
             else:
                 # Final attempt - try with a different filename
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_filename = f"extracted_data_backup_{timestamp}.xlsx"
+                backup_filename = f"invoice_data_backup_{timestamp}.xlsx"
                 st.error(f"❌ Could not save to '{filename}'. Saving as '{backup_filename}' instead.")
                 
                 try:
@@ -171,13 +194,67 @@ def load_existing_data(filename):
         if os.path.exists(filename):
             return pd.read_excel(filename)
         else:
-            return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+            return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
     except PermissionError:
         st.error(f"❌ Cannot read '{filename}'. Please close the file if it's open in Excel.")
-        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
     except Exception as e:
         st.error(f"❌ Error reading file: {str(e)}")
-        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
+
+def create_pincode_analysis(df, pincode_column, title_prefix):
+    """Create pincode analysis for either sender or receiver pincodes."""
+    # Filter out NA pincodes for analysis - improved NA detection
+    valid_pincodes_mask = ((df[pincode_column] != 'NA') & 
+                          (~df[pincode_column].isna()) & 
+                          (df[pincode_column] != '') &
+                          (df[pincode_column].astype(str).str.strip() != 'NA'))
+    valid_pincodes = df[valid_pincodes_mask][pincode_column]
+    
+    if not valid_pincodes.empty:
+        # Convert pincodes to string and clean them
+        valid_pincodes = valid_pincodes.astype(str).str.strip()
+        pincode_counts = valid_pincodes.value_counts()
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Create bar chart for pincode distribution with proper formatting
+            fig_bar = px.bar(
+                x=pincode_counts.index[:10],  # Top 10 pincodes
+                y=pincode_counts.values[:10],
+                title=f"Top 10 {title_prefix} Pincodes by Order Count",
+                labels={'x': 'Pincode', 'y': 'Number of Orders'},
+                color=pincode_counts.values[:10],
+                color_continuous_scale='viridis',
+                text=pincode_counts.values[:10]  # Show values on bars
+            )
+            
+            # Format the x-axis to show pincodes as strings without scientific notation
+            fig_bar.update_layout(
+                xaxis_title="Pincode",
+                yaxis_title="Number of Orders",
+                showlegend=False,
+                xaxis={'type': 'category', 'tickmode': 'array', 'tickvals': pincode_counts.index[:10], 'ticktext': pincode_counts.index[:10]}
+            )
+            
+            # Add text on bars
+            fig_bar.update_traces(texttemplate='%{text}', textposition='outside')
+            
+            st.plotly_chart(fig_bar, use_container_width=True)
+        
+        with col2:
+            st.write(f"**Top 5 {title_prefix} Pincodes:**")
+            for i, (pincode, count) in enumerate(pincode_counts.head().items(), 1):
+                st.write(f"{i}. **{pincode}**: {count} orders")
+            
+            # Most frequent pincode
+            most_frequent_pincode = pincode_counts.index[0]
+            most_frequent_count = pincode_counts.iloc[0]
+            st.success(f"🏆 Most frequent {title_prefix.lower()} pincode: **{most_frequent_pincode}** ({most_frequent_count} orders)")
+    
+    else:
+        st.warning(f"No valid {title_prefix.lower()} pincodes found in the data.")
 
 def create_dashboard(df):
     """Create dashboard with analytics and visualizations."""
@@ -270,60 +347,15 @@ def create_dashboard(df):
     
     st.divider()
     
-    # Pincode Analysis
-    st.subheader("📍 Pincode Analysis")
+    # Sender Pincode Analysis
+    st.subheader("📍 Sender Pincode Analysis")
+    create_pincode_analysis(df, 'Sender Pincode', 'Sender')
     
-    # Filter out NA pincodes for analysis - improved NA detection
-    valid_pincodes_mask = ((df['Pincode'] != 'NA') & 
-                          (~df['Pincode'].isna()) & 
-                          (df['Pincode'] != '') &
-                          (df['Pincode'].astype(str).str.strip() != 'NA'))
-    valid_pincodes = df[valid_pincodes_mask]['Pincode']
+    st.divider()
     
-    if not valid_pincodes.empty:
-        # Convert pincodes to string and clean them
-        valid_pincodes = valid_pincodes.astype(str).str.strip()
-        pincode_counts = valid_pincodes.value_counts()
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            # Create bar chart for pincode distribution with proper formatting
-            fig_bar = px.bar(
-                x=pincode_counts.index[:10],  # Top 10 pincodes
-                y=pincode_counts.values[:10],
-                title="Top 10 Pincodes by Order Count",
-                labels={'x': 'Pincode', 'y': 'Number of Orders'},
-                color=pincode_counts.values[:10],
-                color_continuous_scale='viridis',
-                text=pincode_counts.values[:10]  # Show values on bars
-            )
-            
-            # Format the x-axis to show pincodes as strings without scientific notation
-            fig_bar.update_layout(
-                xaxis_title="Pincode",
-                yaxis_title="Number of Orders",
-                showlegend=False,
-                xaxis={'type': 'category', 'tickmode': 'array', 'tickvals': pincode_counts.index[:10], 'ticktext': pincode_counts.index[:10]}
-            )
-            
-            # Add text on bars
-            fig_bar.update_traces(texttemplate='%{text}', textposition='outside')
-            
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        with col2:
-            st.write("**Top 5 Pincodes:**")
-            for i, (pincode, count) in enumerate(pincode_counts.head().items(), 1):
-                st.write(f"{i}. **{pincode}**: {count} orders")
-            
-            # Most frequent pincode
-            most_frequent_pincode = pincode_counts.index[0]
-            most_frequent_count = pincode_counts.iloc[0]
-            st.success(f"🏆 Most frequent pincode: **{most_frequent_pincode}** ({most_frequent_count} orders)")
-    
-    else:
-        st.warning("No valid pincodes found in the data.")
+    # Receiver Pincode Analysis
+    st.subheader("📍 Receiver Pincode Analysis")
+    create_pincode_analysis(df, 'Receiver Pincode', 'Receiver')
     
     st.divider()
     
@@ -424,7 +456,7 @@ st.title("📊 Invoice Information Extractor & Dashboard")
 tab1, tab2 = st.tabs(["📤 Upload & Extract", "📊 Dashboard"])
 
 with tab1:
-    st.write("**Upload PDF files or ZIP files containing PDFs to extract pincode, delivery/shipment charges (including GST/tax), and main date.**")
+    st.write("**Upload PDF files or ZIP files containing PDFs to extract sender pincode, receiver pincode, delivery/shipment charges, and main date.**")
     uploaded_files = st.file_uploader("Choose PDF or ZIP files", accept_multiple_files=True, type=['pdf', 'zip'])
 
     if uploaded_files:
@@ -450,28 +482,29 @@ with tab1:
                 
                 fields = extract_field(pdf_file)
 
-                pincode = fields.get("pincode", "NA")
+                sender_pincode = fields.get("sender_pincode", "NA")
+                receiver_pincode = fields.get("receiver_pincode", "NA")
                 delivery_charge = fields.get("delivery_charge", "NA")
                 main_date = fields.get("main_date", "NA")
 
-                data.append([file_name, delivery_charge, main_date, pincode])
+                data.append([file_name, delivery_charge, main_date, sender_pincode, receiver_pincode])
                 
                 progress_bar.progress((i + 1) / len(all_pdf_files))
 
             status_text.text("Processing complete!")
             
-            df = pd.DataFrame(data, columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Pincode'])
+            df = pd.DataFrame(data, columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
 
             st.success("✅ Data extracted successfully!")
             st.write("**Extracted Data:**")
             st.dataframe(df, use_container_width=True)
 
-            output_file = "extracted_data.xlsx"
+            output_file = "invoice_data.xlsx"
             final_df = append_to_file(output_file, df)
 
             # Check which file was actually created/updated
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"extracted_data_backup_{timestamp}.xlsx"
+            backup_filename = f"invoice_data_backup_{timestamp}.xlsx"
             
             download_filename = output_file if os.path.exists(output_file) else backup_filename
             
@@ -495,7 +528,7 @@ with tab1:
 
 with tab2:
     # Load existing data for dashboard
-    output_file = "extracted_data.xlsx"
+    output_file = "invoice_data.xlsx"
     existing_df = load_existing_data(output_file)
     
     # Add refresh button

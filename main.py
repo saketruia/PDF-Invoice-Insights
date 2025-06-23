@@ -13,6 +13,7 @@ from plotly.subplots import make_subplots
 import re
 import zipfile
 import io
+from pdf_report_generator import generate_pdf_report, create_download_link
 
 # ------------------------------------------------------------------------------
 # 1. Loading API key from .env
@@ -531,8 +532,56 @@ with tab2:
     output_file = "invoice_data.xlsx"
     existing_df = load_existing_data(output_file)
     
-    # Add refresh button
-    if st.button("🔄 Refresh Dashboard"):
-        st.rerun()
+    # Add refresh button and PDF download
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("🔄 Refresh Dashboard"):
+            st.rerun()
+    
+    with col2:
+        if st.button("📄 Generate PDF Report") and not existing_df.empty:
+            with st.spinner("Generating PDF report..."):
+                try:
+                    # Get date range if available
+                    start_date = None
+                    end_date = None
+                    
+                    # Check if date filtering was applied
+                    df_with_valid_dates = existing_df[existing_df['Main Date'] != 'NA'].copy()
+                    if not df_with_valid_dates.empty:
+                        try:
+                            df_with_valid_dates['Date'] = pd.to_datetime(df_with_valid_dates['Main Date'], format='%d-%m-%Y', errors='coerce')
+                            df_with_valid_dates = df_with_valid_dates.dropna(subset=['Date'])
+                            if not df_with_valid_dates.empty:
+                                start_date = df_with_valid_dates['Date'].min().strftime('%d-%m-%Y')
+                                end_date = df_with_valid_dates['Date'].max().strftime('%d-%m-%Y')
+                        except:
+                            pass
+                    
+                    # Generate PDF
+                    pdf = generate_pdf_report(existing_df, start_date, end_date)
+                    
+                    if pdf:
+                        # Create filename with timestamp
+                        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"invoice_analysis_report_{timestamp}.pdf"
+                        
+                        # Convert bytearray to bytes for Streamlit download_button
+                        pdf_bytearray = pdf.output()
+                        pdf_bytes = bytes(pdf_bytearray)
+                        
+                        # Provide download button
+                        st.download_button(
+                            label="📥 Download PDF Report",
+                            data=pdf_bytes,
+                            file_name=filename,
+                            mime="application/pdf"
+                        )
+                        st.success("✅ PDF report generated successfully!")
+                    else:
+                        st.error("❌ Failed to generate PDF report")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error generating PDF: {str(e)}")
     
     create_dashboard(existing_df)

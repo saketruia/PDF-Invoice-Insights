@@ -171,6 +171,29 @@ def generate_pdf_report(df, start_date=None, end_date=None):
     
     pdf.ln(10)
     
+    # Delivery Charges Distribution Analysis
+    valid_charges = df[df['Numeric_Delivery_Charge'] > 0]['Numeric_Delivery_Charge']
+    if not valid_charges.empty:
+        pdf.set_font(pdf.font_family, 'B', 12)
+        pdf.cell(0, 10, pdf.safe_text('Delivery Charges Distribution'), 0, 1, 'L')
+        pdf.set_font(pdf.font_family, '', 10)
+        
+        # Calculate charge ranges
+        charge_ranges = [
+            ('Rs.0 - Rs.50', len(valid_charges[(valid_charges >= 0) & (valid_charges <= 50)])),
+            ('Rs.51 - Rs.100', len(valid_charges[(valid_charges > 50) & (valid_charges <= 100)])),
+            ('Rs.101 - Rs.200', len(valid_charges[(valid_charges > 100) & (valid_charges <= 200)])),
+            ('Rs.201 - Rs.500', len(valid_charges[(valid_charges > 200) & (valid_charges <= 500)])),
+            ('Above Rs.500', len(valid_charges[valid_charges > 500]))
+        ]
+        
+        for range_text, count in charge_ranges:
+            if count > 0:
+                percentage = (count / len(valid_charges)) * 100
+                pdf.cell(0, 6, pdf.safe_text(f"{range_text}: {count} orders ({percentage:.1f}%)"), 0, 1, 'L')
+        
+        pdf.ln(5)
+    
     # Sender Pincode Analysis
     pdf.set_font(pdf.font_family, 'B', 12)
     pdf.cell(0, 10, pdf.safe_text('Top Sender Pincodes'), 0, 1, 'L')
@@ -178,8 +201,9 @@ def generate_pdf_report(df, start_date=None, end_date=None):
     
     sender_pincodes = get_pincode_analysis(df, 'Sender Pincode')
     if not sender_pincodes.empty:
-        for i, (pincode, count) in enumerate(sender_pincodes.head(5).items(), 1):
-            pdf.cell(0, 6, pdf.safe_text(f"{i}. {pincode}: {count} orders"), 0, 1, 'L')
+        for i, (pincode, count) in enumerate(sender_pincodes.head(10).items(), 1):
+            percentage = (count / len(df)) * 100
+            pdf.cell(0, 6, pdf.safe_text(f"{i}. {pincode}: {count} orders ({percentage:.1f}%)"), 0, 1, 'L')
     else:
         pdf.cell(0, 6, pdf.safe_text("No valid sender pincodes found"), 0, 1, 'L')
     
@@ -192,8 +216,9 @@ def generate_pdf_report(df, start_date=None, end_date=None):
     
     receiver_pincodes = get_pincode_analysis(df, 'Receiver Pincode')
     if not receiver_pincodes.empty:
-        for i, (pincode, count) in enumerate(receiver_pincodes.head(5).items(), 1):
-            pdf.cell(0, 6, pdf.safe_text(f"{i}. {pincode}: {count} orders"), 0, 1, 'L')
+        for i, (pincode, count) in enumerate(receiver_pincodes.head(10).items(), 1):
+            percentage = (count / len(df)) * 100
+            pdf.cell(0, 6, pdf.safe_text(f"{i}. {pincode}: {count} orders ({percentage:.1f}%)"), 0, 1, 'L')
     else:
         pdf.cell(0, 6, pdf.safe_text("No valid receiver pincodes found"), 0, 1, 'L')
     
@@ -222,38 +247,54 @@ def generate_pdf_report(df, start_date=None, end_date=None):
         except:
             pass
     
-    # Add new page for detailed data
-    pdf.add_page()
-    pdf.set_font(pdf.font_family, 'B', 14)
-    pdf.cell(0, 10, pdf.safe_text('Detailed Data'), 0, 1, 'L')
+    pdf.ln(10)
+    
+    # Summary insights
+    pdf.set_font(pdf.font_family, 'B', 12)
+    pdf.cell(0, 10, pdf.safe_text('Key Insights'), 0, 1, 'L')
+    pdf.set_font(pdf.font_family, '', 10)
+    
+    insights = []
+    
+    # Data quality insight
+    if metrics['na_percentage'] > 20:
+        insights.append(f"• High percentage of missing delivery charges ({metrics['na_percentage']:.1f}%) - consider data quality improvement")
+    elif metrics['na_percentage'] < 5:
+        insights.append(f"• Excellent data quality with only {metrics['na_percentage']:.1f}% missing delivery charges")
+    
+    # Cost insights
+    if metrics['avg_charge'] > 0:
+        insights.append(f"• Average delivery cost is Rs.{metrics['avg_charge']:.2f} per order")
+        if metrics['max_charge'] > metrics['avg_charge'] * 3:
+            insights.append(f"• Some orders have unusually high delivery charges (max: Rs.{metrics['max_charge']:.2f})")
+    
+    # Volume insights
+    if not sender_pincodes.empty:
+        top_sender = sender_pincodes.index[0]
+        top_sender_count = sender_pincodes.iloc[0]
+        sender_percentage = (top_sender_count / len(df)) * 100
+        if sender_percentage > 30:
+            insights.append(f"• High concentration from sender pincode {top_sender} ({sender_percentage:.1f}% of orders)")
+    
+    if not receiver_pincodes.empty:
+        top_receiver = receiver_pincodes.index[0]
+        top_receiver_count = receiver_pincodes.iloc[0]
+        receiver_percentage = (top_receiver_count / len(df)) * 100
+        if receiver_percentage > 30:
+            insights.append(f"• High concentration to receiver pincode {top_receiver} ({receiver_percentage:.1f}% of orders)")
+    
+    # Add insights to PDF
+    for insight in insights[:6]:  # Limit to 6 insights to fit on page
+        pdf.cell(0, 6, pdf.safe_text(insight), 0, 1, 'L')
+    
+    if not insights:
+        pdf.cell(0, 6, pdf.safe_text("• Data appears well-distributed across different pincodes and charge ranges"), 0, 1, 'L')
+    
     pdf.ln(5)
     
-    # Table headers
-    pdf.set_font(pdf.font_family, 'B', 8)
-    col_widths = [60, 40, 25, 30, 30]
-    headers = ['File Name', 'Delivery Charge', 'Date', 'Sender PIN', 'Receiver PIN']
-    
-    for i, header in enumerate(headers):
-        pdf.cell(col_widths[i], 8, pdf.safe_text(header), 1, 0, 'C')
-    pdf.ln()
-    
-    # Table data
-    pdf.set_font(pdf.font_family, '', 7)
-    for _, row in df.head(50).iterrows():  # Limit to first 50 rows to avoid too many pages
-        # Truncate long file names
-        file_name = str(row['File Name'])[:40] + '...' if len(str(row['File Name'])) > 40 else str(row['File Name'])
-        
-        pdf.cell(col_widths[0], 6, pdf.safe_text(file_name), 1, 0, 'L')
-        pdf.cell(col_widths[1], 6, pdf.safe_text(str(row['Delivery/Shipment Charges'])[:20]), 1, 0, 'C')
-        pdf.cell(col_widths[2], 6, pdf.safe_text(str(row['Main Date'])[:15]), 1, 0, 'C')
-        pdf.cell(col_widths[3], 6, pdf.safe_text(str(row['Sender Pincode'])[:15]), 1, 0, 'C')
-        pdf.cell(col_widths[4], 6, pdf.safe_text(str(row['Receiver Pincode'])[:15]), 1, 0, 'C')
-        pdf.ln()
-    
-    if len(df) > 50:
-        pdf.ln(5)
-        pdf.set_font(pdf.font_family, 'I', 8)
-        pdf.cell(0, 6, pdf.safe_text(f"Note: Showing first 50 records out of {len(df)} total records"), 0, 1, 'L')
+    # Footer note
+    pdf.set_font(pdf.font_family, 'I', 8)
+    pdf.cell(0, 6, pdf.safe_text("Note: Detailed data can be downloaded separately as Excel/CSV format from the dashboard."), 0, 1, 'L')
     
     return pdf
 

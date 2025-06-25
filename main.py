@@ -22,12 +22,20 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=API_KEY)
 
 def extract_field(pdf_file):
-    """Save PDF temporarily and send it to Gemini to extract sender pincode, receiver pincode, delivery/shipment charges, and main date in pure JSON format."""
-    prompt = """Analyze this PDF and extract sender pincode, receiver pincode, delivery/shipment charges, and a main date in pure JSON format with keys sender_pincode, receiver_pincode, delivery_charge, main_date.
+    """Save PDF temporarily and send it to Gemini to extract invoice number, sender pincode, receiver pincode, delivery/shipment charges, and main date in pure JSON format."""
+    prompt = """Analyze this PDF and extract invoice number, sender pincode, receiver pincode, delivery/shipment charges, and a main date in pure JSON format with keys invoice_number, sender_pincode, receiver_pincode, delivery_charge, main_date.
 
     IMPORTANT INSTRUCTIONS:
     
-    1. PORTER INVOICE DETECTION:
+    1. INVOICE NUMBER EXTRACTION:
+    - Look for invoice number throughout the document
+    - Common terms: "Invoice No", "Invoice Number", "Bill No", "Bill Number", "Receipt No", "Document No"
+    - For Porter invoices: Check top right corner specifically
+    - For other invoices: Search anywhere in the document
+    - Extract the complete alphanumeric invoice number
+    - If not found, put "NA"
+    
+    2. PORTER INVOICE DETECTION:
     - If you see "PORTER" written in the top left corner of the document, this is a Porter invoice
     - For Porter invoices:
       * Use "Total Amount" or "Grand Total" as the delivery_charge (NOT delivery/shipping charges)
@@ -35,13 +43,13 @@ def extract_field(pdf_file):
       * Extract pincodes from pickup location as sender_pincode and drop location as receiver_pincode
       * If pickup/drop locations or their pincodes are not found, put "NA"
     
-    2. REGULAR INVOICES (Non-Porter):
+    3. REGULAR INVOICES (Non-Porter):
     - Look for sender and receiver addresses throughout the document
     - Common terms: "Bill To", "Ship To", "From", "To", "Sender", "Recipient", "Billing Address", "Shipping Address"
     - Extract pincodes from sender address as sender_pincode and receiver address as receiver_pincode
     - For delivery_charge: Look for delivery/shipping charges including GST/tax (same as before)
     
-    3. DELIVERY CHARGE CALCULATION:
+    4. DELIVERY CHARGE CALCULATION:
     - For Porter: Use Total Amount/Grand Total
     - For Regular: If there's a total delivery amount (including GST/tax), use that total amount
     - If only base delivery charge is available without tax, use that amount
@@ -49,15 +57,15 @@ def extract_field(pdf_file):
     - Calculate total = base delivery charge + any applicable taxes/GST
     - If not present, put "NA"
 
-    4. DATE FORMAT:
+    5. DATE FORMAT:
     - Format the main date in DD-MM-YYYY format
     - Look for delivery date, billing date, or invoice date
 
-    5. PINCODES:
+    6. PINCODES:
     - Extract 6-digit pincodes from addresses
     - If sender or receiver pincode not found, put "NA" for that field
 
-    Provide ONLY the raw JSON and nothing else with keys: sender_pincode, receiver_pincode, delivery_charge, main_date"""    
+    Provide ONLY the raw JSON and nothing else with keys: invoice_number, sender_pincode, receiver_pincode, delivery_charge, main_date"""    
     
     model = genai.GenerativeModel('gemini-1.5-flash')  # Free and faster
     
@@ -81,7 +89,7 @@ def extract_field(pdf_file):
             st.error(f"Error retrieving from Gemini (attempt {attempt + 1}): {e}")
             time.sleep(30)  # Wait and retry
     
-    return {"sender_pincode": "NA", "receiver_pincode": "NA", "delivery_charge": "NA", "main_date": "NA"}
+    return {"invoice_number": "NA", "sender_pincode": "NA", "receiver_pincode": "NA", "delivery_charge": "NA", "main_date": "NA"}
 
 def extract_pdfs_from_zip(zip_file):
     """Extract all PDF files from a ZIP file and return them as a list of file-like objects."""
@@ -128,6 +136,20 @@ def process_uploaded_files(uploaded_files):
     
     return all_pdf_files
 
+def check_duplicate_invoice(filename, invoice_number):
+    """Check if invoice number already exists in the Excel file."""
+    try:
+        if os.path.exists(filename) and invoice_number != "NA" and invoice_number != "":
+            existing_df = pd.read_excel(filename)
+            if 'Invoice Number' in existing_df.columns:
+                # Check for duplicate invoice numbers (case-insensitive)
+                existing_invoices = existing_df['Invoice Number'].astype(str).str.upper()
+                return invoice_number.upper() in existing_invoices.values
+        return False
+    except Exception as e:
+        st.error(f"Error checking duplicates: {str(e)}")
+        return False
+
 def append_to_file(filename, new_df):
     """Append new data to an existing Excel file or create it if it doesn't exist."""
     max_attempts = 5
@@ -151,7 +173,7 @@ def append_to_file(filename, new_df):
             else:
                 # Final attempt - try with a different filename
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_filename = f"invoice_data_backup_{timestamp}.xlsx"
+                backup_filename = f"invoice_backup_{timestamp}.xlsx"
                 st.error(f"❌ Could not save to '{filename}'. Saving as '{backup_filename}' instead.")
                 
                 try:
@@ -195,13 +217,13 @@ def load_existing_data(filename):
         if os.path.exists(filename):
             return pd.read_excel(filename)
         else:
-            return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
+            return pd.DataFrame(columns=['File Name', 'Invoice Number', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
     except PermissionError:
         st.error(f"❌ Cannot read '{filename}'. Please close the file if it's open in Excel.")
-        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
+        return pd.DataFrame(columns=['File Name', 'Invoice Number', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
     except Exception as e:
         st.error(f"❌ Error reading file: {str(e)}")
-        return pd.DataFrame(columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
+        return pd.DataFrame(columns=['File Name', 'Invoice Number', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
 
 def create_pincode_analysis(df, pincode_column, title_prefix):
     """Create pincode analysis for either sender or receiver pincodes."""
@@ -446,7 +468,6 @@ def create_dashboard(df):
     st.subheader("📋 Raw Data")
     st.dataframe(df, use_container_width=True)
 
-# ------------------------------------------------------------------------------
 
 # Streamlit UI
 st.set_page_config(page_title="Invoice Analyzer Dashboard", page_icon="📊", layout="wide")
@@ -457,7 +478,7 @@ st.title("📊 Invoice Information Extractor & Dashboard")
 tab1, tab2 = st.tabs(["📤 Upload & Extract", "📊 Dashboard"])
 
 with tab1:
-    st.write("**Upload PDF files or ZIP files containing PDFs to extract sender pincode, receiver pincode, delivery/shipment charges, and main date.**")
+    st.write("**Upload PDF files or ZIP files containing PDFs to extract invoice number, sender pincode, receiver pincode, delivery/shipment charges, and main date.**")
     uploaded_files = st.file_uploader("Choose PDF or ZIP files", accept_multiple_files=True, type=['pdf', 'zip'])
 
     if uploaded_files:
@@ -470,6 +491,7 @@ with tab1:
             st.info(f"📋 Total PDF files to process: {len(all_pdf_files)}")
             
             data = []
+            skipped_files = []
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -483,53 +505,70 @@ with tab1:
                 
                 fields = extract_field(pdf_file)
 
+                invoice_number = fields.get("invoice_number", "NA")
                 sender_pincode = fields.get("sender_pincode", "NA")
                 receiver_pincode = fields.get("receiver_pincode", "NA")
                 delivery_charge = fields.get("delivery_charge", "NA")
                 main_date = fields.get("main_date", "NA")
 
-                data.append([file_name, delivery_charge, main_date, sender_pincode, receiver_pincode])
+                # Check for duplicate invoice number
+                output_file = "invoice.xlsx"
+                if check_duplicate_invoice(output_file, invoice_number):
+                    skipped_files.append(f"{file_name} (Invoice: {invoice_number})")
+                    st.warning(f"⚠️ Skipped {file_name}: Invoice number '{invoice_number}' already exists!")
+                else:
+                    data.append([file_name, invoice_number, delivery_charge, main_date, sender_pincode, receiver_pincode])
                 
                 progress_bar.progress((i + 1) / len(all_pdf_files))
 
             status_text.text("Processing complete!")
             
-            df = pd.DataFrame(data, columns=['File Name', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
+            # Show summary of processing
+            if data:
+                st.success(f"✅ Successfully processed {len(data)} files!")
+            
+            if skipped_files:
+                st.warning(f"⚠️ Skipped {len(skipped_files)} duplicate files:")
+                for skipped in skipped_files:
+                    st.write(f"- {skipped}")
+            
+            if data:
+                df = pd.DataFrame(data, columns=['File Name', 'Invoice Number', 'Delivery/Shipment Charges', 'Main Date', 'Sender Pincode', 'Receiver Pincode'])
 
-            st.success("✅ Data extracted successfully!")
-            st.write("**Extracted Data:**")
-            st.dataframe(df, use_container_width=True)
+                st.write("**Extracted Data (New Records Only):**")
+                st.dataframe(df, use_container_width=True)
 
-            output_file = "invoice_data.xlsx"
-            final_df = append_to_file(output_file, df)
+                final_df = append_to_file(output_file, df)
 
-            # Check which file was actually created/updated
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"invoice_data_backup_{timestamp}.xlsx"
-            
-            download_filename = output_file if os.path.exists(output_file) else backup_filename
-            
-            if os.path.exists(download_filename):
-                with open(download_filename, "rb") as f:
-                    st.download_button(
-                        label="📥 Download as Excel",
-                        data=f,
-                        file_name=download_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-            
-            st.info("💡 Data has been added to the Excel file. Check the Dashboard tab to see updated analytics!")
-            
-            # Show file status
-            if os.path.exists(output_file):
-                st.success(f"✅ Data successfully saved to: {output_file}")
-            elif os.path.exists(backup_filename):
-                st.warning(f"⚠️ Original file was locked, data saved to: {backup_filename}")
-                st.info("💡 To merge with your main file, close Excel and run the upload again.")
+                # Check which file was actually created/updated
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_filename = f"invoice_backup_{timestamp}.xlsx"
+                
+                download_filename = output_file if os.path.exists(output_file) else backup_filename
+                
+                if os.path.exists(download_filename):
+                    with open(download_filename, "rb") as f:
+                        st.download_button(
+                            label="📥 Download as Excel",
+                            data=f,
+                            file_name=download_filename,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                
+                st.info("💡 Data has been added to the Excel file. Check the Dashboard tab to see updated analytics!")
+                
+                # Show file status
+                if os.path.exists(output_file):
+                    st.success(f"✅ Data successfully saved to: {output_file}")
+                elif os.path.exists(backup_filename):
+                    st.warning(f"⚠️ Original file was locked, data saved to: {backup_filename}")
+                    st.info("💡 To merge with your main file, close Excel and run the upload again.")
+            else:
+                st.info("ℹ️ No new records to add. All files were either duplicates or had processing errors.")
 
 with tab2:
     # Load existing data for dashboard
-    output_file = "invoice_data.xlsx"
+    output_file = "invoice.xlsx"
     existing_df = load_existing_data(output_file)
     
     # Add refresh button and PDF download

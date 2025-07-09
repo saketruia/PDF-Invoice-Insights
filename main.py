@@ -17,7 +17,7 @@ from pdf_report_generator import generate_pdf_report, create_download_link
 
 # ------------------------------------------------------------------------------
 # 1. Loading API key from .env
-API_KEY = st.secrets["GEMINI_API_KEY"]["API_KEY"]
+API_KEY = st.secrets["api_key"]["GEMINI_API_KEY"]
 
 genai.configure(api_key=API_KEY)
 

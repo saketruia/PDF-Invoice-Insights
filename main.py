@@ -237,6 +237,8 @@ def create_pincode_analysis(df, pincode_column, title_prefix):
     if not valid_pincodes.empty:
         # Convert pincodes to string and clean them
         valid_pincodes = valid_pincodes.astype(str).str.strip()
+        # Convert to integer (remove .0 if present)
+        valid_pincodes = valid_pincodes.apply(lambda x: str(int(float(x))) if x.replace('.', '', 1).isdigit() and float(x).is_integer() else x)
         pincode_counts = valid_pincodes.value_counts()
         
         col1, col2 = st.columns([2, 1])

@@ -17,8 +17,8 @@ from pdf_report_generator import generate_pdf_report, create_download_link
 
 # ------------------------------------------------------------------------------
 # 1. Loading API key from .env
-load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = st.secrets["GEMINI_API_KEY"]["API_KEY"]
+
 genai.configure(api_key=API_KEY)
 
 def extract_field(pdf_file):
